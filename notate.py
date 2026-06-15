@@ -62,6 +62,28 @@ CLAUDE_MODEL       = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 MAX_DIFF_CHARS = 40_000
 
+# Generated / lock / vendored files: noise that wastes the diff budget and
+# teaches Claude nothing. Excluded from both the diff and the file content.
+NOISE_PATHSPECS = [
+    ":(exclude)**/package-lock.json",
+    ":(exclude)**/pnpm-lock.yaml",
+    ":(exclude)**/yarn.lock",
+    ":(exclude)**/poetry.lock",
+    ":(exclude)**/Pipfile.lock",
+    ":(exclude)**/Cargo.lock",
+    ":(exclude)**/composer.lock",
+    ":(exclude)**/go.sum",
+    ":(exclude)**/*.min.js",
+    ":(exclude)**/*.min.css",
+    ":(exclude)**/*.map",
+    ":(exclude)**/*.snap",
+    ":(exclude)**/__snapshots__/**",
+    ":(exclude)**/dist/**",
+    ":(exclude)**/build/**",
+    ":(exclude)**/vendor/**",
+    ":(exclude)**/*.lock",
+]
+
 # ─── GIT HELPERS ──────────────────────────────────────────────────────────────
 
 def run(cmd: list[str]) -> str:
@@ -136,9 +158,15 @@ def get_commit_info(sha: str) -> dict:
     return {
         "sha":     run(["git", "log", "--format=%H", "-1", sha])[:8],
         "message": run(["git", "log", "--format=%s",  "-1", sha]),
+        "body":    run(["git", "log", "--format=%b",  "-1", sha]).strip(),
         "author":  run(["git", "log", "--format=%an", "-1", sha]),
         "date":    run(["git", "log", "--format=%ad", "--date=short", "-1", sha]),
     }
+
+def git_show_file(ref: str, path: str) -> str | None:
+    """Content of a file as it was at `ref` (not the working tree). None if absent/deleted."""
+    r = subprocess.run(["git", "show", f"{ref}:{path}"], capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else None
 
 def commit_parents(sha: str) -> list[str]:
     return run(["git", "rev-list", "--parents", "-n", "1", sha]).split()[1:]
@@ -147,26 +175,32 @@ def get_diff(commits: list[str]) -> str:
     if len(commits) == 1:
         sha = commits[0]
         if len(commit_parents(sha)) > 1:  # merge commit: `git show` emits no patch → diff vs first parent
-            diff = run(["git", "diff", f"{sha}^1", sha])
+            diff = run(["git", "diff", f"{sha}^1", sha, "--", *NOISE_PATHSPECS])
         else:
-            diff = run(["git", "show", "--stat", "--patch", sha])
+            diff = run(["git", "show", "--stat", "--patch", sha, "--", *NOISE_PATHSPECS])
     else:
-        diff = run(["git", "diff", f"{commits[-1]}^", commits[0]])
+        diff = run(["git", "diff", f"{commits[-1]}^", commits[0], "--", *NOISE_PATHSPECS])
 
     if len(diff) > MAX_DIFF_CHARS:
-        diff = diff[:MAX_DIFF_CHARS] + "\n\n[... diff truncated by size ...]"
+        cut = diff[:MAX_DIFF_CHARS]
+        nl = cut.rfind("\n")            # cut on a line boundary, not mid-line
+        if nl > 0:
+            cut = cut[:nl]
+        diff = cut + "\n\n[... diff truncated by size ...]"
     return diff
 
 def get_modified_files_content(commits: list[str], max_chars: int = 30_000) -> str:
-    """Read the current content of the files modified in the commits."""
+    """Read the content of the modified files as they were at the documented commit."""
     if len(commits) == 1:
         sha = commits[0]
+        ref = sha
         if len(commit_parents(sha)) > 1:  # merge commit
-            files_output = run(["git", "diff", "--name-only", f"{sha}^1", sha])
+            files_output = run(["git", "diff", "--name-only", f"{sha}^1", sha, "--", *NOISE_PATHSPECS])
         else:
-            files_output = run(["git", "diff-tree", "--no-commit-id", "-r", "--name-only", sha])
+            files_output = run(["git", "diff-tree", "--no-commit-id", "-r", "--name-only", sha, "--", *NOISE_PATHSPECS])
     else:
-        files_output = run(["git", "diff", "--name-only", f"{commits[-1]}^", commits[0]])
+        ref = commits[0]
+        files_output = run(["git", "diff", "--name-only", f"{commits[-1]}^", commits[0], "--", *NOISE_PATHSPECS])
 
     if not files_output:
         return ""
@@ -180,16 +214,11 @@ def get_modified_files_content(commits: list[str], max_chars: int = 30_000) -> s
 
     result = []
     total_chars = 0
-    repo_root = run(["git", "rev-parse", "--show-toplevel"])
 
     for filepath in files:
-        full_path = Path(repo_root) / filepath
-        if not full_path.exists():
-            continue
-
-        try:
-            file_content = full_path.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
+        # Content at the commit, not the working tree — matters for old/merged commits.
+        file_content = git_show_file(ref, filepath)
+        if file_content is None:  # deleted in this change, or unreadable
             continue
 
         lines = file_content.splitlines()
@@ -222,10 +251,20 @@ def detect_doc_type(diff: str, forced_type: str | None) -> str:
 
 # ─── CLAUDE ───────────────────────────────────────────────────────────────────
 
-def build_prompt(diff: str, commit_infos: list[dict], doc_type: str, file_contents: str = "") -> str:
-    commits_summary = "\n".join(
-        f"- [{c['date']}] {c['sha']} — {c['message']} ({c['author']})"
-        for c in commit_infos
+def build_prompt(diff: str, commit_infos: list[dict], doc_type: str,
+                 file_contents: str = "", branch: str | None = None) -> str:
+    def fmt_commit(c: dict) -> str:
+        line = f"- [{c['date']}] {c['sha']} — {c['message']} ({c['author']})"
+        body = c.get("body", "").strip()
+        if body:  # the commit body often holds the rationale ("why")
+            line += "\n  " + body.replace("\n", "\n  ")
+        return line
+
+    commits_summary = "\n".join(fmt_commit(c) for c in commit_infos)
+
+    branch_line = (
+        f"BRANCH NAME (often encodes the ticket id and intent): {branch}\n\n"
+        if branch else ""
     )
 
     type_instructions = {
@@ -266,7 +305,7 @@ So, beyond being accurate, the documentation must TEACH: explain the "why" behin
 concrete examples. When you use a technical term (e.g. "dependency injection", "memoization",
 "idempotency", "guard clause"), define it briefly the first time in plain language.
 
-INCLUDED COMMITS:
+{branch_line}INCLUDED COMMITS:
 {commits_summary}
 
 IMPLEMENTATION TYPE: {doc_type}
@@ -728,6 +767,7 @@ def main():
         sys.exit(1)
 
     # Resolve commits
+    branch_name = None
     if args.from_sha:
         to = args.to_sha or "HEAD"
         print(f"🔍 Analyzing commits: {args.from_sha}..{to}")
@@ -736,12 +776,12 @@ def main():
         commits = args.commits
         print(f"🔍 Using {len(commits)} specified commit(s)")
     else:
-        branch = args.branch or get_current_branch()
-        if branch in ("main", "master", "HEAD"):
+        branch_name = args.branch or get_current_branch()
+        if branch_name in ("main", "master", "HEAD"):
             print("❌ You are on the base branch (or detached HEAD). Switch to your feature branch, or use --commits/--from.")
             sys.exit(1)
-        print(f"🔍 Analyzing branch: {branch}")
-        commits = get_commits_from_branch(branch)
+        print(f"🔍 Analyzing branch: {branch_name}")
+        commits = get_commits_from_branch(branch_name)
 
     if not commits:
         print("❌ No commits found")
@@ -759,7 +799,7 @@ def main():
 
     print("   Reading modified files...")
     file_contents = get_modified_files_content(commits)
-    doc = call_claude(build_prompt(diff, commit_infos, doc_type, file_contents))
+    doc = call_claude(build_prompt(diff, commit_infos, doc_type, file_contents, branch=branch_name))
 
     if args.dry_run:
         print("\n📄 RESULT (dry-run, nothing written to Notion):\n")
