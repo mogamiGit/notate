@@ -70,7 +70,7 @@ git diff  ──▶  Claude (structured JSON)  ──▶  Notion blocks  ──�
 
 - **Zero third-party dependencies.** HTTP to Claude and Notion is done with `urllib`, git via `subprocess`. The tool installs and runs anywhere Python does — no virtualenv, no supply-chain surface, no `pip install` before first use. Trade-off: I write the request/response plumbing by hand instead of leaning on `requests`/`anthropic`.
 
-- **Claude returns structured JSON, not prose.** The prompt constrains the model to a fixed JSON schema, so the output maps deterministically onto Notion blocks (headings, tables, code). The prompt also forbids inventing code — only lines that appear literally in the diff — which keeps the generated docs grounded instead of plausibly-wrong.
+- **Claude returns schema-enforced JSON, not prose.** The request uses the Claude API's structured outputs (`output_config.format` with a JSON schema), so the response is guaranteed valid JSON that maps deterministically onto Notion blocks (headings, tables, code) — no fragile string-cleaning, no "the model wrapped it in prose" failure class. The prompt also forbids inventing code (only lines that appear literally in the diff), which keeps the generated docs grounded instead of plausibly-wrong.
 
 - **Merge commits are diffed against the first parent.** `git show <merge>` emits only a stat summary, no patch — a silent failure that produced empty docs. The tool detects multi-parent commits and switches to `git diff <sha>^1 <sha>`, recovering the full feature diff. This is the kind of edge case that only surfaces in real use.
 
@@ -100,7 +100,7 @@ Works only with **local** commits — run `git fetch` first if you copied a hash
 | `ANTHROPIC_API_KEY` | Claude API key |
 | `NOTION_API_KEY` | Notion integration token (share the target database with the integration) |
 | `NOTION_DOCS_DATABASE_ID` | Target database |
-| `CLAUDE_MODEL` | Optional. Model to use (default `claude-sonnet-4-6`) |
+| `CLAUDE_MODEL` | Optional. Model to use (default `claude-sonnet-4-6`; must support structured outputs) |
 
 ### Notion database schema
 
@@ -121,6 +121,14 @@ Share the database with your Notion integration so the token can write to it.
 - Python 3.10+ (stdlib only — no `pip install`)
 - `git`
 - A Notion database shared with your integration
+
+## Tests
+
+Pure functions (markdown→Notion conversion, type detection, prompt building, schema) are covered by a standard-library test suite — no dependencies to install:
+
+```bash
+python -m unittest discover tests
+```
 
 ## Limitations
 

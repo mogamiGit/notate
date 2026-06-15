@@ -35,9 +35,13 @@ from pathlib import Path
 
 ENV_FILE = Path.home() / ".env.notate"
 
+REQUIRED_VARS = ("ANTHROPIC_API_KEY", "NOTION_API_KEY", "NOTION_DOCS_DATABASE_ID")
+
 def load_env():
-    """Load variables from ~/.env.notate without external dependencies."""
+    """Load variables from ~/.env.notate. Falls back to the real environment (CI/tests)."""
     if not ENV_FILE.exists():
+        if all(os.environ.get(k) for k in REQUIRED_VARS):
+            return  # already provided via the environment
         print(f"⚠️  {ENV_FILE} not found")
         print("   Create it with:")
         print("   ANTHROPIC_API_KEY=sk-ant-...")
@@ -396,6 +400,33 @@ DIFF (concrete changes introduced):
 {diff}
 """
 
+# JSON Schema for structured outputs — guarantees Claude returns valid, parseable
+# JSON instead of best-effort prose we have to clean up. All fields are required;
+# the model fills empties with "" or "[TODO]" as instructed in the prompt.
+DOC_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title":             {"type": "string"},
+        "overview":          {"type": "string"},
+        "data_flow":         {"type": "string"},
+        "data_contracts":    {"type": "string"},
+        "technical_details": {"type": "string"},
+        "error_handling":    {"type": "string"},
+        "decisions":         {"type": "string"},
+        "breaking_changes":  {"type": "string"},
+        "examples":          {"type": "string"},
+        "todos":             {"type": "array", "items": {"type": "string"}},
+        "notes":             {"type": "string"},
+        "concepts":          {"type": "string"},
+    },
+    "required": [
+        "title", "overview", "data_flow", "data_contracts", "technical_details",
+        "error_handling", "decisions", "breaking_changes", "examples",
+        "todos", "notes", "concepts",
+    ],
+    "additionalProperties": False,
+}
+
 CLAUDE_TIMEOUT = 300  # seconds
 
 def _spinner(stop: threading.Event, label: str):
@@ -415,7 +446,8 @@ def call_claude(prompt: str) -> dict:
     payload = json.dumps({
         "model": CLAUDE_MODEL,
         "max_tokens": 16000,
-        "messages": [{"role": "user", "content": prompt}]
+        "messages": [{"role": "user", "content": prompt}],
+        "output_config": {"format": {"type": "json_schema", "schema": DOC_SCHEMA}},
     }).encode()
 
     req = urllib.request.Request(
