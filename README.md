@@ -1,0 +1,131 @@
+# notate
+
+> Turn a git branch or merge commit into structured, junior-friendly technical documentation — auto-published to a Notion database.
+
+**Status:** ✅ Used daily on a real monorepo. Zero third-party dependencies (Python stdlib only).
+
+## Install
+
+```bash
+git clone https://github.com/mogamiGit/notate
+cd notate
+./install.sh        # symlinks `notate` into ~/.local/bin
+```
+
+Then create `~/.env.notate`:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+NOTION_API_KEY=secret_...
+NOTION_DOCS_DATABASE_ID=your-database-id
+```
+
+## Why it exists
+
+Documenting what a PR actually changed — for teammates, for onboarding juniors — is tedious and usually skipped. I wanted a single command that reads a git diff and writes a teaching-oriented doc straight into a team's Notion, explaining not just *what* changed but *why*, naming the patterns and concepts a junior should learn. No tool did this, so I built one.
+
+## Example session
+
+```
+$ notate
+🔍 Analyzing branch: feature/export-config
+❌ Branch 'feature/export-config' has no commits of its own vs 'main'.
+   Already merged (merge commit ac1e6855). Document it with:
+     notate --commits ac1e6855
+
+$ notate --commits ac1e6855
+🔍 Using 1 commit(s)
+   Type detected: MIXED
+   Repository:    my-monorepo
+   Reading modified files...
+🤖 Analyzing commits with Claude... ⠹ 47s
+✅ Analysis complete in 52s
+📝 Creating Notion entry...
+
+✅ Documentation created in Notion
+   🔗 https://notion.so/...
+```
+
+It detected the branch was already merged, found the merge commit, and pointed at the exact command to run.
+
+## What you get
+
+A new Notion entry with: **Overview**, **Data flow** (text diagram of how the changed files connect), **Data contracts** (interfaces/types extracted literally from the diff), **Technical details**, **Error handling & edge cases**, **Technical decisions**, **Breaking changes**, **Usage examples**, **TODOs**, and a **Concepts & techniques** teaching section aimed at juniors.
+
+Properties set on the entry: type (`api`/`frontend`/`mixed`, auto-detected), date, project, commit SHAs.
+
+## How it works
+
+```
+git diff  ──▶  Claude (structured JSON)  ──▶  Notion blocks  ──▶  database entry
+```
+
+1. Resolves commits from a branch, range, or explicit SHAs (handles merge commits — `git show` won't emit a patch for a merge, so it diffs against the first parent).
+2. Sends the diff + full content of changed files to Claude with a prompt that forbids inventing code (only literal lines from the diff).
+3. Converts the returned markdown into Notion blocks (tables, code, headings) and creates the page via the Notion API.
+
+## Technical decisions
+
+- **Zero third-party dependencies.** HTTP to Claude and Notion is done with `urllib`, git via `subprocess`. The tool installs and runs anywhere Python does — no virtualenv, no supply-chain surface, no `pip install` before first use. Trade-off: I write the request/response plumbing by hand instead of leaning on `requests`/`anthropic`.
+
+- **Claude returns structured JSON, not prose.** The prompt constrains the model to a fixed JSON schema, so the output maps deterministically onto Notion blocks (headings, tables, code). The prompt also forbids inventing code — only lines that appear literally in the diff — which keeps the generated docs grounded instead of plausibly-wrong.
+
+- **Merge commits are diffed against the first parent.** `git show <merge>` emits only a stat summary, no patch — a silent failure that produced empty docs. The tool detects multi-parent commits and switches to `git diff <sha>^1 <sha>`, recovering the full feature diff. This is the kind of edge case that only surfaces in real use.
+
+- **Fail fast with actionable errors.** Every failure mode — not a git repo, sitting on `main`, an already-merged branch, a commit that isn't fetched locally — stops early and prints the exact next command to run, rather than a raw git error. The merged-branch path even auto-detects the merge commit and hands you the command.
+
+- **Resilient UX around a blocking network call.** The Claude request can take a minute. A background thread renders a spinner with elapsed seconds; the call has a hard timeout and typed handling for network drops and Ctrl-C, so the tool never hangs silently or dumps a traceback.
+
+- **Single file, on purpose.** At ~700 lines this is a script, not a framework. Splitting it into packages would add ceremony without buying anything. Pragmatism over architecture theater.
+
+## CLI reference
+
+| Goal | Command |
+|---|---|
+| Document the current branch | `notate` |
+| Document another branch | `notate --branch other-branch` |
+| A commit range | `notate --from abc1234 --to def5678` |
+| Specific commits / a merge | `notate --commits abc1234` |
+| Force the doc type | `notate --type api` |
+| Preview without writing to Notion | `notate --dry-run` |
+
+Works only with **local** commits — run `git fetch` first if you copied a hash from GitHub.
+
+## Configuration
+
+| Variable | Purpose |
+|---|---|
+| `ANTHROPIC_API_KEY` | Claude API key |
+| `NOTION_API_KEY` | Notion integration token (share the target database with the integration) |
+| `NOTION_DOCS_DATABASE_ID` | Target database |
+| `CLAUDE_MODEL` | Optional. Model to use (default `claude-sonnet-4-6`) |
+
+### Notion database schema
+
+The target must be a Notion **database** with these properties:
+
+| Property | Type |
+|---|---|
+| `Name` (title) | Title |
+| `Type` | Select |
+| `Date` | Date |
+| `Project` | Text |
+| `Commits` | Text |
+
+Share the database with your Notion integration so the token can write to it.
+
+## Requirements
+
+- Python 3.10+ (stdlib only — no `pip install`)
+- `git`
+- A Notion database shared with your integration
+
+## Limitations
+
+- Large diffs are truncated at 40k characters — very large PRs get partial coverage.
+- The target must be a Notion **database** with the expected properties, not a plain page.
+- Quality of the doc tracks the quality of the commit diff: if the diff is noisy, so is the output.
+
+## License
+
+MIT
