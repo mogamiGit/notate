@@ -121,6 +121,80 @@ class BuildPrompt(unittest.TestCase):
         self.assertIn("DIFF", p)
 
 
+class DetectAreas(unittest.TestCase):
+    def test_frontend(self):
+        self.assertEqual(notate.detect_areas(["src/components/Button.tsx"]), ["frontend"])
+
+    def test_backend(self):
+        self.assertEqual(notate.detect_areas(["backend/server/app/main.py"]), ["backend"])
+
+    def test_multi_area_ordered(self):
+        files = ["src/pages/Home.tsx", "backend/api/route.py", "db/migrations/001.sql"]
+        self.assertEqual(notate.detect_areas(files), ["backend", "frontend", "db"])
+
+    def test_test_file_tagged(self):
+        areas = notate.detect_areas(["backend/tests/test_x.py"])
+        self.assertIn("tests", areas)
+        self.assertIn("backend", areas)
+
+    def test_infra_and_ci(self):
+        self.assertEqual(notate.detect_areas(["k8s/base/deploy.yaml", ".github/workflows/ci.yml"]),
+                         ["infra", "ci"])
+
+    def test_docs(self):
+        self.assertEqual(notate.detect_areas(["README.md"]), ["docs"])
+
+    def test_fallback_other(self):
+        self.assertEqual(notate.detect_areas(["weird/config.toml"]), ["other"])
+
+    def test_empty(self):
+        self.assertEqual(notate.detect_areas([]), [])
+
+
+class Traceability(unittest.TestCase):
+    def test_parse_slug_ssh(self):
+        self.assertEqual(notate.parse_repo_slug("git@github.com:owner/repo.git"), "owner/repo")
+
+    def test_parse_slug_https(self):
+        self.assertEqual(notate.parse_repo_slug("https://github.com/owner/repo.git"), "owner/repo")
+
+    def test_parse_slug_host_alias(self):
+        self.assertEqual(notate.parse_repo_slug("git@github.com-segunda:mogamiGit/notate.git"),
+                         "mogamiGit/notate")
+
+    def test_pr_number_from_merge(self):
+        ci = [{"message": "Merge pull request #226 from org/NIXON-305-fix"}]
+        self.assertEqual(notate.extract_pr_number(ci), "226")
+
+    def test_pr_number_from_squash(self):
+        self.assertEqual(notate.extract_pr_number([{"message": "feat: thing (#42)"}]), "42")
+
+    def test_pr_number_none(self):
+        self.assertIsNone(notate.extract_pr_number([{"message": "plain commit"}]))
+
+    def test_ticket_from_branch(self):
+        self.assertEqual(notate.extract_ticket("NIXON-305-fix-export", []), "NIXON-305")
+
+    def test_ticket_from_merge_message(self):
+        ci = [{"message": "Merge pull request #226 from org/NIXON-305-fix", "body": ""}]
+        self.assertEqual(notate.extract_ticket(None, ci), "NIXON-305")
+
+    def test_ticket_none(self):
+        self.assertIsNone(notate.extract_ticket(None, [{"message": "no ticket", "body": ""}]))
+
+    def test_build_pr_url_pr(self):
+        self.assertEqual(notate.build_pr_url("owner/repo", "226", []),
+                         "https://github.com/owner/repo/pull/226")
+
+    def test_build_pr_url_commit_fallback(self):
+        ci = [{"sha": "abc1234"}]
+        self.assertEqual(notate.build_pr_url("owner/repo", None, ci),
+                         "https://github.com/owner/repo/commit/abc1234")
+
+    def test_build_pr_url_no_slug(self):
+        self.assertIsNone(notate.build_pr_url(None, "226", []))
+
+
 class DocSchema(unittest.TestCase):
     def test_required_matches_properties(self):
         props = set(notate.DOC_SCHEMA["properties"])

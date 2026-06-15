@@ -54,7 +54,7 @@ It detected the branch was already merged, found the merge commit, and pointed a
 
 A new Notion entry with: **Overview**, **Data flow** (text diagram of how the changed files connect), **Data contracts** (interfaces/types extracted literally from the diff), **Technical details**, **Error handling & edge cases**, **Technical decisions**, **Breaking changes**, **Usage examples**, **TODOs**, and a **Concepts & techniques** teaching section aimed at juniors.
 
-Properties set on the entry: type (`api`/`frontend`/`mixed`, auto-detected), date, project, commit SHAs.
+Properties set on the entry: **Areas** (`backend`/`frontend`/`db`/`infra`/`tests`/`ci`/`docs`, derived from the changed paths), **Project** (repo), **Ticket** (parsed from the branch/merge message, e.g. `NIXON-305`), **PR** (clickable link to the pull request or commit), date, commit SHAs.
 
 ## How it works
 
@@ -106,15 +106,17 @@ Works only with **local** commits — run `git fetch` first if you copied a hash
 
 The target must be a Notion **database** with these properties:
 
-| Property | Type |
-|---|---|
-| `Name` (title) | Title |
-| `Type` | Select |
-| `Date` | Date |
-| `Project` | Text |
-| `Commits` | Text |
+| Property | Type | Notes |
+|---|---|---|
+| `Name` | Title | Feature name (generated) |
+| `Areas` | Multi-select | `backend`/`frontend`/`db`/`infra`/`tests`/`ci`/`docs`, derived from changed paths |
+| `Ticket` | Select | Parsed from branch/merge message (e.g. `NIXON-305`); group related entries by it |
+| `PR` | URL | Clickable link to the pull request (or commit) |
+| `Project` | Text | Repository name |
+| `Commits` | Text | Short SHAs (traceability detail) |
+| `Date` | Date | |
 
-Share the database with your Notion integration so the token can write to it.
+Multi-select / select options are created on the fly by the Notion API. Share the database with your Notion integration so the token can write to it.
 
 ## Requirements
 

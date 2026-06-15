@@ -195,23 +195,14 @@ def get_diff(commits: list[str]) -> str:
 
 def get_modified_files_content(commits: list[str], max_chars: int = 30_000) -> str:
     """Read the content of the modified files as they were at the documented commit."""
-    if len(commits) == 1:
-        sha = commits[0]
-        ref = sha
-        if len(commit_parents(sha)) > 1:  # merge commit
-            files_output = run(["git", "diff", "--name-only", f"{sha}^1", sha, "--", *NOISE_PATHSPECS])
-        else:
-            files_output = run(["git", "diff-tree", "--no-commit-id", "-r", "--name-only", sha, "--", *NOISE_PATHSPECS])
-    else:
-        ref = commits[0]
-        files_output = run(["git", "diff", "--name-only", f"{commits[-1]}^", commits[0], "--", *NOISE_PATHSPECS])
-
-    if not files_output:
+    ref = commits[0]  # newest commit = the snapshot to read file contents from
+    files_list = get_changed_files(commits)
+    if not files_list:
         return ""
 
     extensions = (".ts", ".tsx", ".js", ".jsx", ".py", ".vue", ".rb", ".go",
                   ".java", ".kt", ".rs", ".php", ".cs", ".swift")
-    files = [f for f in files_output.splitlines() if f.endswith(extensions)]
+    files = [f for f in files_list if f.endswith(extensions)]
 
     if not files:
         return ""
@@ -241,6 +232,7 @@ def get_modified_files_content(commits: list[str], max_chars: int = 30_000) -> s
 
 
 def detect_doc_type(diff: str, forced_type: str | None) -> str:
+    """Coarse hint that steers the prompt only (NOT a Notion property)."""
     if forced_type:
         return forced_type
     has_backend  = bool(re.search(r'\+\+\+ b/.*(route|controller|api|endpoint|view|serializer)', diff, re.I))
@@ -252,6 +244,89 @@ def detect_doc_type(diff: str, forced_type: str | None) -> str:
     elif has_frontend:
         return "frontend"
     return "mixed"
+
+def get_changed_files(commits: list[str]) -> list[str]:
+    """All paths touched by the change (noise excluded)."""
+    if len(commits) == 1:
+        sha = commits[0]
+        if len(commit_parents(sha)) > 1:  # merge commit
+            out = run(["git", "diff", "--name-only", f"{sha}^1", sha, "--", *NOISE_PATHSPECS])
+        else:
+            out = run(["git", "diff-tree", "--no-commit-id", "-r", "--name-only", sha, "--", *NOISE_PATHSPECS])
+    else:
+        out = run(["git", "diff", "--name-only", f"{commits[-1]}^", commits[0], "--", *NOISE_PATHSPECS])
+    return out.splitlines() if out else []
+
+# Canonical display order for the Areas multi-select.
+AREA_ORDER = ["backend", "frontend", "db", "infra", "tests", "ci", "docs"]
+
+def detect_areas(files: list[str]) -> list[str]:
+    """Deterministic per-path area tagging — replaces the always-MIXED Type bucket."""
+    found = set()
+    for raw in files:
+        p = raw.lower()
+        base = p.rsplit("/", 1)[-1]
+        if p.endswith((".tsx", ".jsx", ".vue", ".svelte")) or "/components/" in p or "/pages/" in p:
+            found.add("frontend")
+        if p.endswith(".py") or "/server/" in p or "/api/" in p or "/controllers/" in p or "/services/" in p:
+            found.add("backend")
+        if "/migrations/" in p or p.endswith(".sql") or "/models/" in p:
+            found.add("db")
+        if p.startswith("k8s/") or "/k8s/" in p or "/helm/" in p or "dockerfile" in base or p.endswith(".tf"):
+            found.add("infra")
+        if ".github/" in p or "gitlab-ci" in p:
+            found.add("ci")
+        if ("/tests/" in p or "__tests__" in p or base.startswith("test_")
+                or base.endswith((".spec.ts", ".test.ts", ".spec.tsx", ".test.tsx"))
+                or base.endswith(("_test.go", "_test.py"))):
+            found.add("tests")
+        if p.endswith((".md", ".mdx", ".rst")):
+            found.add("docs")
+    ordered = [a for a in AREA_ORDER if a in found]
+    return ordered or (["other"] if files else [])
+
+# ─── TRACEABILITY (repo slug, PR, ticket) ─────────────────────────────────────
+
+def parse_repo_slug(remote: str) -> str | None:
+    """owner/repo from an ssh or https remote URL (host aliases included)."""
+    m = re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?$", remote)
+    return m.group(1) if m else None
+
+def get_repo_slug() -> str | None:
+    try:
+        return parse_repo_slug(run(["git", "remote", "get-url", "origin"]))
+    except SystemExit:
+        return None
+
+def extract_pr_number(commit_infos: list[dict]) -> str | None:
+    for c in commit_infos:
+        m = re.search(r"#(\d+)", c.get("message", ""))
+        if m:
+            return m.group(1)
+    return None
+
+def extract_ticket(branch: str | None, commit_infos: list[dict]) -> str | None:
+    """Ticket id (e.g. NIXON-305) from the branch name or commit messages/bodies."""
+    pat = re.compile(r"\b([A-Z]{2,}-\d+)\b")
+    if branch:
+        m = pat.search(branch)
+        if m:
+            return m.group(1)
+    for c in commit_infos:
+        for field in (c.get("message", ""), c.get("body", "")):
+            m = pat.search(field or "")
+            if m:
+                return m.group(1)
+    return None
+
+def build_pr_url(slug: str | None, pr: str | None, commit_infos: list[dict]) -> str | None:
+    if not slug:
+        return None
+    if pr:
+        return f"https://github.com/{slug}/pull/{pr}"
+    if commit_infos:
+        return f"https://github.com/{slug}/commit/{commit_infos[0]['sha']}"
+    return None
 
 # ─── CLAUDE ───────────────────────────────────────────────────────────────────
 
@@ -715,7 +790,8 @@ def build_page_blocks(doc: dict) -> list[dict]:
 
     return blocks
 
-def create_notion_entry(doc: dict, commit_infos: list[dict], doc_type: str, repo: str) -> str:
+def create_notion_entry(doc: dict, commit_infos: list[dict], areas: list[str],
+                        ticket: str | None, pr_url: str | None, repo: str) -> str:
     """Create a new entry in the Notion database."""
     today        = datetime.now().strftime("%Y-%m-%d")
     commits_text = ", ".join(c["sha"] for c in commit_infos)
@@ -724,8 +800,8 @@ def create_notion_entry(doc: dict, commit_infos: list[dict], doc_type: str, repo
         "title": {
             "title": [{"type": "text", "text": {"content": doc["title"]}}]
         },
-        "Type": {
-            "select": {"name": doc_type.upper()}
+        "Areas": {
+            "multi_select": [{"name": a} for a in areas]
         },
         "Date": {
             "date": {"start": today}
@@ -737,6 +813,10 @@ def create_notion_entry(doc: dict, commit_infos: list[dict], doc_type: str, repo
             "rich_text": [{"type": "text", "text": {"content": commits_text}}]
         }
     }
+    if ticket:
+        properties["Ticket"] = {"select": {"name": ticket}}
+    if pr_url:
+        properties["PR"] = {"url": pr_url}
 
     blocks = build_page_blocks(doc)
 
@@ -823,11 +903,19 @@ def main():
 
     commit_infos = [get_commit_info(sha) for sha in commits]
     diff         = get_diff(commits)
-    doc_type     = detect_doc_type(diff, args.type)
+    doc_type     = detect_doc_type(diff, args.type)   # prompt hint only
     repo         = get_repo_name()
 
-    print(f"   Type detected: {doc_type.upper()}")
+    areas  = detect_areas(get_changed_files(commits))
+    ticket = extract_ticket(branch_name, commit_infos)
+    pr_url = build_pr_url(get_repo_slug(), extract_pr_number(commit_infos), commit_infos)
+
     print(f"   Repository:    {repo}")
+    print(f"   Areas:         {', '.join(areas) or '—'}")
+    if ticket:
+        print(f"   Ticket:        {ticket}")
+    if pr_url:
+        print(f"   PR:            {pr_url}")
 
     print("   Reading modified files...")
     file_contents = get_modified_files_content(commits)
@@ -838,7 +926,7 @@ def main():
         print(json.dumps(doc, indent=2, ensure_ascii=False))
         return
 
-    url = create_notion_entry(doc, commit_infos, doc_type, repo)
+    url = create_notion_entry(doc, commit_infos, areas, ticket, pr_url, repo)
 
     print(f"\n✅ Documentation created in Notion")
     print(f"   🔗 {url}")
