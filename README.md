@@ -26,6 +26,8 @@ Documenting what a PR actually changed — for teammates, for onboarding juniors
 
 ## Example session
 
+![notate demo](docs/demo.gif)
+
 ```
 $ notate
 🔍 Analyzing branch: feature/export-config
