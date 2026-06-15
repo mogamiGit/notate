@@ -135,6 +135,18 @@ Group related pages in Notion by the **Ticket** property to see everything touch
 
 ### Notion database schema
 
+The fastest way to set this up is to **duplicate the ready-made template**. You can also build the database by hand.
+
+**Duplicate the template (recommended)**
+
+1. Open the [**notate template**](https://tundra-sturgeon-196.notion.site/b62327b5f7484257ad6268a0c44d1b8a) and click **Duplicate** (top right) to copy the database — schema, views, and a worked example — into your workspace.
+2. Create a [Notion integration](https://www.notion.so/my-integrations) and share your duplicated database with it.
+3. Get the database id from the URL: `notion.so/<workspace>/<32-hex-id>?v=...` — the 32-character id (before `?v=`) is your `NOTION_DOCS_DATABASE_ID`.
+
+The template ships three views: **All Docs** (table), **By Area** (grouped list), and **Changelog** (timeline by date).
+
+**Or build it by hand**
+
 The target must be a Notion **database** with these properties:
 
 | Property | Type | Notes |
